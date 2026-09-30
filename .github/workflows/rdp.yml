@@ -9,6 +9,8 @@ jobs:
     timeout-minutes: 360
 
     steps:
+
+      # 1. Connect Windows runner to Tailscale
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -16,6 +18,68 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
+      # 2. Create the RDP user
+      - name: Create RDP user
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $securePassword = ConvertTo-SecureString `
+            $env:RDP_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $user = Get-LocalUser `
+            -Name "rdpuser" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -eq $user) {
+
+              New-LocalUser `
+                -Name "rdpuser" `
+                -Password $securePassword `
+                -PasswordNeverExpires `
+                -AccountNeverExpires `
+                -Description "Temporary RDP user"
+
+          } else {
+
+              Set-LocalUser `
+                -Name "rdpuser" `
+                -Password $securePassword
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "rdpuser" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "RDP user created/configured successfully."
+
+      # 3. Verify the RDP user
+      - name: Verify RDP user
+        shell: powershell
+        run: |
+          $user = Get-LocalUser -Name "rdpuser" -ErrorAction Stop
+
+          Write-Host "Username: $($user.Name)"
+          Write-Host "Enabled: $($user.Enabled)"
+
+          $members = Get-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -ErrorAction Stop
+
+          $found = $members | Where-Object {
+              $_.Name -like "*\rdpuser"
+          }
+
+          if ($null -eq $found) {
+              throw "rdpuser is not a member of Remote Desktop Users."
+          }
+
+          Write-Host "rdpuser is a member of Remote Desktop Users."
+
+      # 4. Enable Windows Remote Desktop
       - name: Enable RDP
         shell: powershell
         run: |
@@ -24,18 +88,24 @@ jobs:
             -Name 'fDenyTSConnections' `
             -Value 0
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name 'UserAuthentication' `
             -Value 1
 
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Write-Host "Remote Desktop enabled."
+
+      # 5. Show Tailscale IPv4 address
       - name: Show Tailscale IP
         shell: powershell
         run: |
+          Write-Host "Tailscale IPv4:"
           tailscale ip -4
 
+      # 6. Keep the temporary runner alive
       - name: Keep runner alive
         shell: powershell
         run: |
